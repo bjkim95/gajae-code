@@ -677,3 +677,78 @@ export async function activateModelProfile(
 	const prepared = await prepareModelProfileActivation(options);
 	await applyPreparedModelProfileActivation(prepared, applyOptions);
 }
+
+/**
+ * Whether every provider a profile needs is currently authenticated. Mirrors the
+ * credential gate in {@link prepareModelProfileActivation}: all strict providers
+ * must be authenticated, and each alternative group needs at least one. Returns
+ * the unauthenticated required providers alongside the verdict for messaging.
+ */
+export async function resolveModelProfileMissingCredentials(options: {
+	modelRegistry: Pick<ModelRegistry, "getModelProfiles" | "getModelProfile" | "getApiKeyForProvider">;
+	sessionId: string | undefined;
+	profileName: string;
+}): Promise<{ satisfied: boolean; missing: string[] }> {
+	const profiles = options.modelRegistry.getModelProfiles();
+	const name = resolveModelProfileName(options.profileName, profiles);
+	const profile = profiles.get(name) ?? options.modelRegistry.getModelProfile(name);
+	if (!profile) return { satisfied: false, missing: [] };
+
+	const providers = aggregateModelProfileRequiredProviders(profile.requiredProviders, profile);
+	const alternativeGroups = profile.alternativeProviderGroups ?? [];
+	const alternativeSet = new Set(alternativeGroups.flat());
+	const authenticated = new Set<string>();
+	const missing: string[] = [];
+	for (const provider of providers) {
+		const apiKey = await options.modelRegistry.getApiKeyForProvider(provider, options.sessionId);
+		if (isAuthenticated(apiKey)) authenticated.add(provider);
+		else missing.push(provider);
+	}
+
+	const strictSatisfied = providers.every(p => authenticated.has(p) || alternativeSet.has(p));
+	const groupsSatisfied = alternativeGroups.every(group => group.some(p => authenticated.has(p)));
+	return { satisfied: strictSatisfied && groupsSatisfied && authenticated.size > 0, missing };
+}
+
+/**
+ * Pick a model profile that can fully activate under the currently available
+ * credentials, to substitute for `failedProfileName` when its own required
+ * providers are missing. Used only by the startup default-profile path when
+ * `modelProfile.fallbackOnMissingCredentials` is enabled.
+ *
+ * Selection is deterministic: among the profiles whose required providers are
+ * all satisfied (excluding the failed profile itself), prefer the one that
+ * shares the most required providers with the failed profile, then the fewest
+ * required providers, then the lexicographically-first name. Returns undefined
+ * when no profile can activate.
+ */
+export async function selectAuthenticatedFallbackProfile(options: {
+	modelRegistry: Pick<ModelRegistry, "getModelProfiles" | "getModelProfile" | "getApiKeyForProvider">;
+	sessionId: string | undefined;
+	failedProfileName: string;
+}): Promise<string | undefined> {
+	const { modelRegistry, sessionId } = options;
+	const profiles = modelRegistry.getModelProfiles();
+	const failedName = resolveModelProfileName(options.failedProfileName, profiles);
+	const failed = profiles.get(failedName);
+	const failedProviders = new Set(
+		failed ? aggregateModelProfileRequiredProviders(failed.requiredProviders, failed) : [],
+	);
+
+	const candidates: Array<{ name: string; shared: number; required: number }> = [];
+	for (const [name, profile] of profiles) {
+		if (name === failedName) continue;
+		const { satisfied } = await resolveModelProfileMissingCredentials({
+			modelRegistry,
+			sessionId,
+			profileName: name,
+		});
+		if (!satisfied) continue;
+		const providers = aggregateModelProfileRequiredProviders(profile.requiredProviders, profile);
+		const shared = providers.filter(p => failedProviders.has(p)).length;
+		candidates.push({ name, shared, required: providers.length });
+	}
+
+	candidates.sort((a, b) => b.shared - a.shared || a.required - b.required || a.name.localeCompare(b.name));
+	return candidates[0]?.name;
+}

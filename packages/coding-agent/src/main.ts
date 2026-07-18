@@ -26,7 +26,12 @@ import { buildInitialMessage } from "./cli/initial-message";
 import { runListModelsCommand } from "./cli/list-models";
 import { selectSession } from "./cli/session-picker";
 import { findConfigFile } from "./config";
-import { activateModelProfile, ModelProfileCredentialError } from "./config/model-profile-activation";
+import {
+	activateModelProfile,
+	ModelProfileCredentialError,
+	resolveModelProfileMissingCredentials,
+	selectAuthenticatedFallbackProfile,
+} from "./config/model-profile-activation";
 import { ModelRegistry, ModelsConfigFile } from "./config/model-registry";
 import { resolveCliModel, resolveModelRoleValue, resolveModelScope, type ScopedModel } from "./config/model-resolver";
 import { selectorHead } from "./config/model-selector-value";
@@ -410,7 +415,37 @@ async function applyStartupModelProfilesWithPolicy(
 	}
 
 	if (defaultProfile) {
-		await applyProfile(defaultProfile, false, {
+		// Opt-in recovery: when the startup default profile can't activate because a
+		// provider lost its credentials (e.g. a cancelled subscription), substitute an
+		// available profile instead of skipping/exiting. Runs before activation so it
+		// works in both interactive and non-interactive startup, and leaves the
+		// explicit `--mpreset` path below (and the onCredentialError policy) untouched.
+		let effectiveDefault = defaultProfile;
+		if (args.settings.get("modelProfile.fallbackOnMissingCredentials") === true) {
+			const { satisfied, missing } = await resolveModelProfileMissingCredentials({
+				modelRegistry: args.modelRegistry,
+				sessionId: args.session.sessionId,
+				profileName: defaultProfile,
+			});
+			if (!satisfied) {
+				const fallbackName = await selectAuthenticatedFallbackProfile({
+					modelRegistry: args.modelRegistry,
+					sessionId: args.session.sessionId,
+					failedProfileName: defaultProfile,
+				});
+				if (fallbackName) {
+					const missingLabel =
+						missing.length > 0 ? `missing credentials: ${missing.join(", ")}` : "missing credentials";
+					process.stderr.write(
+						`${chalk.yellow(
+							`Warning: default model profile "${defaultProfile}" is unavailable (${missingLabel}); falling back to "${fallbackName}". Run /login to restore it.`,
+						)}\n`,
+					);
+					effectiveDefault = fallbackName;
+				}
+			}
+		}
+		await applyProfile(effectiveDefault, false, {
 			thinkingLevelOverride: args.settings.has("defaultThinkingLevel")
 				? args.settings.get("defaultThinkingLevel")
 				: undefined,

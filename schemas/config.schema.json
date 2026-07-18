@@ -265,6 +265,11 @@
 				"default": {
 					"type": "string",
 					"description": "Model profile applied automatically at startup"
+				},
+				"fallbackOnMissingCredentials": {
+					"type": "boolean",
+					"description": "When the startup default model profile lacks provider credentials, fall back to an available profile instead of exiting",
+					"default": false
 				}
 			},
 			"additionalProperties": false

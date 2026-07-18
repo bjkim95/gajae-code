@@ -7,10 +7,13 @@ import {
 	activateModelProfile,
 	applyPreparedModelProfileActivation,
 	formatModelProfileCredentialError,
+	ModelProfileCredentialError,
 	materializeActiveModelProfileAssignment,
 	materializeActiveModelProfileAssignments,
 	materializeModelProfileForDeletion,
 	prepareModelProfileActivation,
+	resolveModelProfileMissingCredentials,
+	selectAuthenticatedFallbackProfile,
 } from "../src/config/model-profile-activation";
 
 import type { ModelProfileDefinition } from "../src/config/model-profiles";
@@ -875,6 +878,98 @@ describe("model profile activation", () => {
 			executor: "explicit/executor",
 			architect: "provider-a/architect",
 		});
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Startup fallback-on-missing-credentials tests
+// ---------------------------------------------------------------------------
+
+const comboProfiles: ModelProfileDefinition[] = [
+	{
+		name: "combo",
+		requiredProviders: ["anthropic", "openai-codex"],
+		modelMapping: { default: "anthropic/claude-fable-5:high", executor: "openai-codex/gpt-5.5:low" },
+		source: "builtin",
+	},
+	{
+		name: "claude-opus",
+		requiredProviders: ["anthropic"],
+		modelMapping: { default: "anthropic/claude-opus-4-8:xhigh" },
+		source: "builtin",
+	},
+	{
+		name: "claude-fable",
+		requiredProviders: ["anthropic"],
+		modelMapping: { default: "anthropic/claude-fable-5:xhigh" },
+		source: "builtin",
+	},
+	{
+		name: "glm",
+		requiredProviders: ["zai"],
+		modelMapping: { default: "zai/glm-5.1" },
+		source: "builtin",
+	},
+];
+
+describe("startup fallback on missing credentials", () => {
+	it("reports a satisfied profile as available", async () => {
+		const result = await resolveModelProfileMissingCredentials({
+			modelRegistry: fakeRegistry({ missingProviders: ["openai-codex"], profiles: comboProfiles }),
+			sessionId: "session-1",
+			profileName: "claude-fable",
+		});
+		expect(result.satisfied).toBe(true);
+		expect(result.missing).toEqual([]);
+	});
+
+	it("reports the unauthenticated providers for an unsatisfiable profile", async () => {
+		const result = await resolveModelProfileMissingCredentials({
+			modelRegistry: fakeRegistry({ missingProviders: ["openai-codex"], profiles: comboProfiles }),
+			sessionId: "session-1",
+			profileName: "combo",
+		});
+		expect(result.satisfied).toBe(false);
+		expect(result.missing).toEqual(["openai-codex"]);
+	});
+
+	it("prefers a provider-sharing fallback, breaking ties by name", async () => {
+		const fallback = await selectAuthenticatedFallbackProfile({
+			modelRegistry: fakeRegistry({ missingProviders: ["openai-codex"], profiles: comboProfiles }),
+			sessionId: "session-1",
+			failedProfileName: "combo",
+		});
+		// claude-opus & claude-fable both share `anthropic` (1) and require 1 provider;
+		// glm shares 0. Tie broken lexicographically → claude-fable.
+		expect(fallback).toBe("claude-fable");
+	});
+
+	it("returns undefined when no profile can activate", async () => {
+		const fallback = await selectAuthenticatedFallbackProfile({
+			modelRegistry: fakeRegistry({
+				missingProviders: ["anthropic", "openai-codex", "zai"],
+				profiles: comboProfiles,
+			}),
+			sessionId: "session-1",
+			failedProfileName: "combo",
+		});
+		expect(fallback).toBeUndefined();
+	});
+
+	it("activation throws a typed ModelProfileCredentialError carrying the missing providers", async () => {
+		let caught: unknown;
+		try {
+			await activateModelProfile({
+				session: fakeSession(),
+				modelRegistry: fakeRegistry({ missingProviders: ["openai-codex"], profiles: comboProfiles }),
+				settings: Settings.isolated(),
+				profileName: "combo",
+			});
+		} catch (error) {
+			caught = error;
+		}
+		expect(caught).toBeInstanceOf(ModelProfileCredentialError);
+		expect((caught as ModelProfileCredentialError).providers).toEqual(["openai-codex"]);
 	});
 });
 

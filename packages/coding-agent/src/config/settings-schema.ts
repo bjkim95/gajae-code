@@ -468,6 +468,16 @@ export const SETTINGS_SCHEMA = {
 			options: "runtime",
 		},
 	},
+	"modelProfile.fallbackOnMissingCredentials": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "model",
+			label: "Fallback On Missing Credentials",
+			description:
+				"When the startup default model profile lacks provider credentials, fall back to an available profile instead of exiting",
+		},
+	},
 
 	modelTags: { type: "record", default: EMPTY_MODEL_TAGS_RECORD },
 
